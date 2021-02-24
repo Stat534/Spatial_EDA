@@ -1,0 +1,140 @@
+---
+title: "Spatial EDA"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(gstat)
+library(sp)
+library(datasets)
+library(SemiPar)
+library(ggmap)
+set.seed(02192021)
+```
+# Exploratory Data Analysis
+
+## EDA Overview
+
+\vfill
+
+## Data Decomposition: Time Series
+
+\vfill
+
+```{r}
+plot(decompose(AirPassengers))
+```
+
+\newpage
+
+## Data Decomposition: Spatial Data
+
+\vfill
+
+
+## Response Surface vs. Spatial Surface
+
+\vfill
+
+## Spatial EDA Overview
+
+1. Map of locations
+2. Histrogram or other distributional figure
+3. 3D scatterplot
+4. General Regression EDA
+5. Variograms and variogram clouds
+6. Anistopic diagnostics
+
+\newpage
+
+# Scallops Data Example
+
+## 1. Map of Locations
+```{r, message = F}
+data(scallop)
+scallop <- scallop %>% mutate(log.catch = log(tot.catch + 1))
+
+scallops_box <- c(left = min(scallop$longitude)-.25, bottom = min(scallop$latitude)-.25, right = max(scallop$longitude)+.25, top =max(scallop$latitude)+.25)
+scallops_map <- get_map(scallops_box) %>% ggmap()
+  
+scallops_map + geom_point(aes(x = longitude, y = latitude, color= tot.catch), data = scallop, inherit.aes = F)
+```
+
+## 1. Map of Locations - Takeaways
+
+\vfill
+
+\newpage
+
+## 2. Histogram
+```{r}
+scallop %>% ggplot(aes(x=tot.catch)) + geom_histogram(bins=70) + ggtitle('histogram of scallop catch') + xlab('Number of Scallops') + theme_bw()
+```
+
+```{r}
+scallop %>% ggplot(aes(x=log.catch)) + geom_histogram(bins=70) + ggtitle('histogram of log scallop catch (+1)') + xlab('Number of Scallops') + theme_bw()
+```
+
+## 2. Histogram - Takeaways
+
+\vfill
+
+\newpage
+
+## 3. 3D scatterplot
+```{r}
+scallop %>%  ggplot(aes(x=longitude, y = latitude)) + geom_point(aes(color=tot.catch)) + scale_colour_gradient2() + theme_bw()
+```
+
+```{r}
+scallop %>% ggplot(aes(x=longitude, y = latitude)) + geom_point(aes(color=log.catch)) + scale_colour_gradient2() + theme_bw()
+```
+
+## 3. 3D scatterplot - Takeaways
+
+\vfill
+
+\newpage
+
+## 4. General Regression EDA
+
+\vfill
+
+## 5. Variograms and variogram clouds
+
+```{r,  eval = T}
+coordinates(scallop) = ~longitude+latitude
+scallop.sp <- scallop
+proj4string(scallop.sp) <- CRS("+proj=longlat +datum=WGS84")  ## for example
+scallop.utm <- spTransform(scallop.sp, CRS("+proj=utm +zone=18 ellps=WGS84"))
+
+plot(variogram(log.catch~1, scallop.utm))
+```
+
+```{r}
+plot(variogram(log.catch~1, scallop.utm, cloud=T))
+```
+
+## 5. Variograms and variogram clouds: Takeaways
+
+\vfill
+
+\newpage 
+
+## 6. Anisotropy
+
+_Goal:_ Determine if direction influences spatial structure
+
+
+## Directional Variogram
+
+
+```{r}
+plot(variogram(log.catch~1, scallop.sp, alpha = c(0, 45, 90, 135)))
+```
+
+
