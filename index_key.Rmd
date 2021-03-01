@@ -1,0 +1,253 @@
+---
+title: 'EDA demo'
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(rstan)
+library(mnormt)
+library(plgp)
+library(gstat)
+library(sp)
+library(datasets)
+library(SemiPar)
+library(ggmap)
+library(loo)
+set.seed(02282021)
+options(mc.cores = parallel::detectCores())
+```
+
+# Scallops Data Example
+
+1. Create a test and training set from the scallop dataset. Then create a visual to show the test / training datasets.
+
+
+```{r, message = F}
+data(scallop)
+scallop <- scallop %>% mutate(log.catch = log(tot.catch + 1), 
+                              id = 1:n())
+
+data_fig <- scallop %>% ggplot(aes(x=longitude, y = latitude, color = log.catch)) + geom_point() +  theme_bw() + scale_color_gradientn(colours = colorspace::diverge_hcl(7))
+data_fig
+
+scallop_train <- scallop %>% sample_n(100)
+scallop_test <- scallop %>% filter(!id %in% scallop_train$id)
+```
+
+
+```{r}
+data_fig + geom_point(aes(y = latitude, x = longitude), inherit.aes = F, data = scallop_test, color = "black", size = 3)+ geom_point(aes(y = latitude, x = longitude), color = "white", inherit.aes = F, data = scallop_test, size = 2) + geom_point()
+```
+
+2. Write code to estimate a non-spatial model using just the mean structure. Then construct a figure that includes mean predictions for each site in the test dataset.
+
+```{r}
+x <- cbind(scallop_train$latitude,scallop_train$longitude)
+d <- sqrt(plgp::distance(x))
+num_preds <- nrow(scallop_test)
+x_preds <- cbind(scallop_test$latitude,scallop_test$longitude)
+d_preds <- sqrt(plgp::distance(x_preds))
+d_12 <- sqrt(plgp::distance(x, x_preds))
+```
+
+```{stan output.var='mean_model', eval = F}
+data {
+  int<lower=0> N; // number of observed data points 
+  vector[N] y; // observed response
+  int<lower=0> N_preds; // number of predictive points
+}
+
+parameters {
+  real<lower = 0> tausq;
+  real mu;
+}
+
+transformed parameters{
+  vector[N] mu_vec;
+  vector[N] tausq_vec;
+  for(i in 1:N) mu_vec[i] = mu;
+  for(i in 1:N) tausq_vec[i] = tausq;
+}
+
+model {
+  y ~ multi_normal(mu_vec ,diag_matrix(tausq_vec));
+  mu ~ normal(0, 10);
+  
+}
+
+generated quantities {
+  vector[N_preds] y_preds;
+  vector[N_preds] mu_preds;
+  vector[N_preds] tausq_preds;
+
+  for(i in 1:N_preds) mu_preds[i] = mu;
+  for(i in 1:N_preds) tausq_preds[i] = tausq;
+
+  y_preds = multi_normal_rng(mu_preds, diag_matrix(tausq_preds));
+}
+
+```
+
+
+
+```{r, results = 'hide'}
+mean_surface <- stan("mean_regression.stan", 
+                  data=list(N = nrow(scallop_train), 
+                            y = scallop_train$log.catch,
+                            N_preds = num_preds),
+                  iter = 5000)
+```
+
+```{r}
+print(mean_surface, pars = c('mu', 'tausq', 'y_preds[1]','y_preds[2]','y_preds[3]'))
+
+mean_preds <- colMeans(extract(mean_surface)['y_preds']$y_preds)
+
+pred_df <- scallop_test %>% bind_cols(tibble(preds = mean_preds))
+
+data_fig + geom_point(aes(y = latitude, x = longitude), color = "black", inherit.aes = F, data = pred_df, size = 3) + geom_point(aes(y = latitude, x = longitude), color = "white", inherit.aes = F, data = pred_df, size = 2) +
+geom_point(aes(y = latitude, x = longitude, color = preds), data = pred_df, size = 1, inherit.aes = F) 
+```
+
+3. Now fit a model with spatial structure and construct a figure that includes mean predictions for each site in the test dataset.
+
+```{stan output.var="spatial_regression_chol", eval = F}
+data {
+  int<lower=0> N; // number of observed data points 
+  vector[N] y; // observed response
+  matrix[N,N] dist; // observed distance matrix
+  real phi_lower; // lower point for phi (range)
+  real phi_upper; // upper point for phi (range)
+  int<lower=0> N_preds; // number of predictive points
+  matrix[N_preds,N_preds] dist_preds; // distance matrix for predictive points
+  matrix[N, N_preds] dist_12; //distance between observed and predicted
+  real phi_a;
+  real phi_b;
+  real sigmasq_a;
+  real sigmasq_b;
+  real tausq_a;
+  real tausq_b;
+}
+
+parameters {
+  real<lower = phi_lower, upper = phi_upper> phi;
+  real<lower = 0> sigmasq;
+  real<lower = 0> tausq;
+  real mu;
+}
+
+transformed parameters{
+  vector[N] mu_vec;
+  vector[N] tausq_vec;
+  corr_matrix[N] Sigma;
+  
+  for(i in 1:N) mu_vec[i] = mu;
+  for(i in 1:(N-1)){
+   for(j in (i+1):N){
+     Sigma[i,j] = exp((-1)*dist[i,j]/ phi);
+     Sigma[j,i] = Sigma[i,j];
+   }
+ }
+ for(i in 1:N) Sigma[i,i] = 1;
+ for(i in 1:N) tausq_vec[i] = tausq;
+}
+
+model {
+  matrix[N, N] L;
+  L = cholesky_decompose(sigmasq * Sigma + diag_matrix(tausq_vec));
+
+  y ~ multi_normal_cholesky(mu_vec, L);
+  phi ~ inv_gamma(phi_a, phi_b);
+  sigmasq ~ inv_gamma(sigmasq_a, sigmasq_b);
+  tausq ~ inv_gamma(tausq_a, tausq_b);
+  mu ~ normal(0, 10);
+}
+
+generated quantities {
+  vector[N_preds] y_preds;
+  vector[N] y_diff;
+  vector[N_preds] mu_preds;
+  corr_matrix[N_preds] Sigma_preds;
+  vector[N_preds] tausq_preds;
+  matrix[N, N_preds] Sigma_12;
+
+  for(i in 1:N_preds) tausq_preds[i] = tausq;
+  for(i in 1:N_preds) mu_preds[i] = mu;
+  for(i in 1:N) y_diff[i] = y[i] - mu;
+  
+
+  for(i in 1:(N_preds-1)){
+   for(j in (i+1):N_preds){
+     Sigma_preds[i,j] = exp((-1)*dist_preds[i,j]/ phi);
+     Sigma_preds[j,i] = Sigma_preds[i,j];
+   }
+ }
+ for(i in 1:N_preds) Sigma_preds[i,i] = 1;
+ 
+   for(i in 1:(N)){
+   for(j in (1):N_preds){
+     Sigma_12[i,j] = exp((-1)*dist_12[i,j]/ phi);
+   }
+ }
+
+ y_preds = multi_normal_rng(mu_preds + (sigmasq * Sigma_12)' * inverse(sigmasq * Sigma) * (y_diff), sigmasq * Sigma_preds + diag_matrix(tausq_preds) - (sigmasq * Sigma_12)' * inverse(sigmasq * Sigma + diag_matrix(tausq_vec)) * (sigmasq * Sigma_12) );
+}
+
+```
+
+
+```{r, results = 'hide'}
+spatial_surface <- stan("spatial_regression_chol.stan", 
+                  data=list(N = nrow(scallop_train), 
+                            y = scallop_train$log.catch,
+                            dist = d,
+                            phi_lower= .05,
+                            phi_upper = 2.5,
+                            N_preds = num_preds,
+                            dist_preds = d_preds,
+                            dist_12 = d_12,
+                            phi_a = 1,
+                            phi_b = 1,
+                            sigmasq_a = 3,
+                            sigmasq_b = 3,
+                            tausq_a = 3,
+                            tausq_b = 3),
+                 chains = 2)
+```
+
+
+```{r}
+print(spatial_surface, pars = c('mu', 'sigmasq','tausq', 'y_preds[1]','y_preds[2]','y_preds[3]'))
+
+
+spatial_preds <- colMeans(extract(spatial_surface)['y_preds']$y_preds)
+
+pred_df_spatial <-  pred_df %>% bind_cols(tibble(spatial_preds = spatial_preds))
+
+data_fig + geom_point(aes(y = latitude, x = longitude), color = "black", inherit.aes = F, data = pred_df, size = 3) + geom_point(aes(y = latitude, x = longitude), color = "white", inherit.aes = F, data = pred_df_spatial, size = 2) +
+geom_point(aes(y = latitude, x = longitude, color = spatial_preds), data = pred_df_spatial, size = 1, inherit.aes = F) 
+```
+
+
+4. Compare the predictive ability of the spatial and non-spatial model
+
+```{r}
+pred_df_spatial %>% mutate(diff_mean = tot.catch - exp(preds),
+                           diff_spatial = tot.catch - exp(spatial_preds)) %>%
+  summarise(rmse_mean = sqrt(mean(diff_mean^2) ),
+            rmse_spatial = sqrt(mean(diff_spatial^2)),
+            mad_mean = mean(abs(diff_mean)),
+            mad_spatial = mean(abs(diff_spatial)))
+```
+
+
+### Other model fitting options
+
+- `krige()` in the `gstat` package. However, the spatial structure needs to be extracted from fitting a variogram to the empirical variogram.
+
+- `geoR` has `krige.conv()` and `krige.bayes()` options see textbook for more.
+
+- `spBayes` is another package with quite a few options
+
